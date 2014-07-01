@@ -204,14 +204,14 @@ class ActionBan(object):
 
             for ip in d:
                 self.logger.info("Removing {} from jail {}".format(ip, jail_name))
-                check_output("sudo ipset del {} {}".format(jail_name, ip), shell=True)
+                check_output(["sudo", "ipset", "del", jail_name, ip])
                 del dct[ip]
 
         for jail_name, ip in new_bans:
             self.logger.info("Jailing ip {} on jail {}".format(ip, jail_name))
             self.jails_members[jail_name][ip] = t
-            check_output("sudo ipset create {} iphash -exist".format(jail_name), shell=True)
-            check_output("sudo ipset add {} {} -exist".format(jail_name, ip), shell=True)
+            check_output(["sudo", "ipset", "create", jail_name, "iphash", "-exist"])
+            check_output(["sudo", "ipset", "add", jail_name, ip, "-exist"])
         self.jails_members.sync()
 
     def exit(self, signal=None):
