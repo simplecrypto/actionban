@@ -13,21 +13,22 @@ sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 32)
 
 
 def jailer(ip):
+    seeds = [random.randint(1, 100) for _ in xrange(10)]
     while True:
         #print("ip {} action".format(ip))
-        if random.randint(1, 10) == 1:
-            sock.sendto("action test {} 1 100 1000 30".format(ip), (UDP_IP, UDP_PORT))
-        if random.randint(1, 5) == 1:
-            sock.sendto("action test2 {} 1 100 1000 30".format(ip), (UDP_IP, UDP_PORT))
-        if random.randint(1, 7) == 1:
-            sock.sendto("action test3 {} 1 100 1000 30".format(ip), (UDP_IP, UDP_PORT))
-        if random.randint(1, 50) == 1:
-            sock.sendto("action test4 {} 1 100 1000 30".format(ip), (UDP_IP, UDP_PORT))
-        if random.randint(1, 2) == 1:
-            sock.sendto("action test5 {} 1 100 1000 30".format(ip), (UDP_IP, UDP_PORT))
-        if random.randint(1, 5) == 1:
-            sock.sendto("action test6 {} 1 100 1000 30".format(ip), (UDP_IP, UDP_PORT))
-        gevent.sleep(random.uniform(0, 0.0001))
+        if random.randint(1, seeds[0]) == 1:
+            sock.sendto("action test {} 1 10 100 30".format(ip), (UDP_IP, UDP_PORT))
+        if random.randint(1, seeds[1]) == 1:
+            sock.sendto("action test2 {} 1 10 100 30".format(ip), (UDP_IP, UDP_PORT))
+        if random.randint(1, seeds[2]) == 1:
+            sock.sendto("action test3 {} 1 10 100 30".format(ip), (UDP_IP, UDP_PORT))
+        if random.randint(1, seeds[3]) == 1:
+            sock.sendto("action test4 {} 1 10 100 30".format(ip), (UDP_IP, UDP_PORT))
+        if random.randint(1, seeds[4]) == 1:
+            sock.sendto("action test5 {} 1 10 100 30".format(ip), (UDP_IP, UDP_PORT))
+        if random.randint(1, seeds[5]) == 1:
+            sock.sendto("action test6 {} 1 10 100 30".format(ip), (UDP_IP, UDP_PORT))
+        gevent.sleep(random.uniform(0, 0.2))
 
 for i in xrange(1000):
     print("spawning new ip")

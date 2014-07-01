@@ -1,4 +1,5 @@
 import yaml
+import socket
 import argparse
 import setproctitle
 import gevent
@@ -6,7 +7,10 @@ import signal
 import time
 import sys
 import subprocess
+import shelve
+import os
 
+from subprocess import check_output
 from gevent import spawn, sleep
 from gevent.monkey import patch_all
 from gevent.event import Event
@@ -18,12 +22,12 @@ from collections import deque
 from copy import copy
 
 from .utils import time_format, recursive_update
-from .monitor import MonitorWSGI
+from .monitor import MonitorWSGI, root
 import actionban
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Run powerpool!')
+def _config():
+    parser = argparse.ArgumentParser(description='Run ActionBan')
     parser.add_argument('config', type=argparse.FileType('r'),
                         help='yaml configuration file to run with')
     args = parser.parse_args()
@@ -31,14 +35,39 @@ def main():
     # override those defaults with a loaded yaml config
     raw_config = yaml.load(args.config) or {}
     raw_config.setdefault('actionban', {})
+    return raw_config
+
+
+def main():
+    raw_config = _config()
 
     # check that config has a valid address
     server = ActionBan(raw_config, **raw_config['actionban'])
     server.run()
 
 
+def send():
+    parser = argparse.ArgumentParser(description='Send a message to ActionBan')
+    parser.add_argument('-p', '--port', default=9000)
+    parser.add_argument('-s', '--host', default='127.0.0.1')
+    parser.add_argument('message', help='the raw UDP message to send')
+    args = parser.parse_args()
+
+    UDP_IP = args.host
+    UDP_PORT = args.port
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 32)
+    sock.sendto(args.message, (UDP_IP, UDP_PORT))
+
+
 class ActionBan(object):
-    def __init__(self, raw_config, procname="actionban", term_timeout=3, loggers=None):
+    def __init__(self, raw_config, procname="actionban", term_timeout=3,
+                 loggers=None, config_db_file=None, members_db_file=None):
+        if not config_db_file:
+            config_db_file = os.path.join(root, "config_database")
+        if not members_db_file:
+            members_db_file = os.path.join(root, "members_database")
         if not loggers:
             loggers = [{'type': 'StreamHandler', 'level': 'DEBUG'}]
         self.log_handlers = []
@@ -56,7 +85,6 @@ class ActionBan(object):
             formatter = logging.Formatter(fmt)
             handler.setFormatter(formatter)
             self.log_handlers.append((log_cfg.get('listen'), handler))
-
         self.logger = self.register_logger('manager')
 
         self.logger.info("=" * 80)
@@ -75,7 +103,7 @@ class ActionBan(object):
             # try and fetch the git version information
             try:
                 output = subprocess.check_output("git show -s --format='%ci %h'",
-                                                shell=True).strip().rsplit(" ", 1)
+                                                 shell=True).strip().rsplit(" ", 1)
                 self.sha = output[1]
                 self.rev_date = output[0]
             # celery won't work with this, so set some default
@@ -90,9 +118,11 @@ class ActionBan(object):
 
         # Primary data structures
         self.jails = {}
-        self.jails_memebers = {}
-        self.jails_config = {}
+        self.jails_members = shelve.open(members_db_file, writeback=True)
+        self.logger.debug("Loaded {} from shelve".format(dict(self.jails_members)))
+        self.jails_config = shelve.open(config_db_file, writeback=True)
         self.stats = {'actions': Windower()}
+        self.rotation_stats = deque([], 20)
 
     def register_logger(self, name):
         logger = logging.getLogger(name)
@@ -160,6 +190,30 @@ class ActionBan(object):
 
         self.logger.info("=" * 80)
 
+    def commit_sync_bans(self, new_bans):
+        # Unjail expired members
+        t = int(time.time())
+
+        for jail_name, dct in self.jails_members.iteritems():
+            expire_duration = self.jails_config[jail_name][2]
+            expire_time = t - expire_duration
+            d = []
+            for ip, t in dct.iteritems():
+                if t < expire_time:
+                    d.append(ip)
+
+            for ip in d:
+                self.logger.info("Removing {} from jail {}".format(ip, jail_name))
+                check_output("sudo ipset del {} {}".format(jail_name, ip), shell=True)
+                del dct[ip]
+
+        for jail_name, ip in new_bans:
+            self.logger.info("Jailing ip {} on jail {}".format(ip, jail_name))
+            self.jails_members[jail_name][ip] = t
+            check_output("sudo ipset create {} iphash -exist".format(jail_name), shell=True)
+            check_output("sudo ipset add {} {} -exist".format(jail_name, ip), shell=True)
+        self.jails_members.sync()
+
     def exit(self, signal=None):
         """ Handle an exit request """
         self.logger.info("*" * 80)
@@ -180,15 +234,14 @@ class ActionBan(object):
             while True:
                 t = time.time()
                 tot_jails = 0
-                # time to tick?
+                new_bans = []
                 for jail_key, jail in self.jails.iteritems():
                     tot_jails += len(jail)
                     sec_thresh, min_thresh, _ = self.jails_config[jail_key]
                     d = []
                     for ip, can in jail.iteritems():
-                        if (can.sum >= min_thresh or can.slices[-1] >= sec_thresh) and ip not in self.jails_memebers[jail_key]:
-                            self.logger.info("Jailing ip {} on jail {}".format(ip, jail_key))
-                            self.jails_memebers[jail_key][ip] = t
+                        if (can.sum >= min_thresh or can.slices[-1] >= sec_thresh) and ip not in self.jails_members[jail_key]:
+                            new_bans.append((jail_key, ip))
                         can.tick()
                         if can.sum == 0:
                             d.append(ip)
@@ -203,6 +256,8 @@ class ActionBan(object):
 
                 self.logger.info("{} Jails rotated in {}"
                                  .format(tot_jails, time_format(time.time() - t)))
+                self.commit_sync_bans(new_bans)
+                self.rotation_stats.append((tot_jails, time.time() - t))
                 sleep(last_tick - time.time() + 1.0)
         except gevent.GreenletExit:
             self.logger.info("Jail manager exiting...")
@@ -218,7 +273,7 @@ class ActionServer(DatagramServer):
         self._set_config(**config)
         self.server = server
         self.jails = server.jails
-        self.jails_memebers = server.jails_memebers
+        self.jails_members = server.jails_members
         self.jails_config = server.jails_config
         self.stats = server.stats
         self.logger = server.register_logger("action_server")
@@ -230,14 +285,23 @@ class ActionServer(DatagramServer):
         if command == "action":
             # args: [jail_name, ip_address, action_count, min_thresh, sec_thresh]
             if args[0] not in self.jails:
-                self.jails_config[args[0]] = [int(i) for i in args[3:]]
                 self.jails[args[0]] = {}
-                self.jails_memebers[args[0]] = {}
+                self.jails_members[args[0]] = {}
+                self.jails_config[args[0]] = [int(i) for i in args[3:]]
+                self.jails_config.sync()
             jail = self.jails[args[0]]
             if args[1] not in jail:
                 jail[args[1]] = Windower()
             jail[args[1]].incr(int(args[2]))
             self.stats['actions'].incr()
+            return
+        if command == "jail":
+            self.jails[args[0]] = {}
+            self.jails_members[args[0]] = {}
+            self.jails_config[args[0]] = [int(i) for i in args[1:]]
+            self.jails_config.sync()
+            self.logger.info("Updated/created jail {} config with args {}"
+                             .format(args[0], args[1:]))
 
 
 class Windower(object):

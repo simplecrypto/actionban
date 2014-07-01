@@ -12,7 +12,8 @@ setup(name='actionban',
       packages=find_packages(),
       entry_points={
           'console_scripts': [
-              'actionban = actionban.main:main'
+              'actionban = actionban.main:main',
+              'actionban_send = actionban.main:send'
           ]
       }
       )
